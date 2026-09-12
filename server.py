@@ -230,20 +230,12 @@ async def _entity_report(market: str, entity: str, report: str, path: str,
 # а полное дерево — это десятки страниц, то есть десятки единиц лимита.
 _CAT_CACHE: dict[str, tuple[float, list[Any]]] = {}
 _CAT_TTL = 21600  # 6 часов
-_CAT_PAGE = 500
-_CAT_BATCH = 6  # страниц за один заход, параллельно
+_CAT_PAGE = 500  # ограничение API на диапазон строк
 _CAT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-async def _category_page(market: str, date: str | None, start: int) -> list[Any]:
-    body = {"startRow": start, "endRow": start + _CAT_PAGE,
-            "filterModel": {}, "sortModel": []}
-    data = await _call("POST", BASES[market], "category/list", {"date": date}, body)
-    rows = data.get("data", data) if isinstance(data, dict) else data
-    return rows if isinstance(rows, list) else []
-
-
 async def _category_tree(market: str, date: str | None) -> list[Any]:
+    """Полное дерево категорий одним запросом (эндпоинт отдаёт его целиком)."""
     key = f"{market}:{date or ''}"
     lock = _CAT_LOCKS.setdefault(key, asyncio.Lock())
     async with lock:
@@ -251,20 +243,14 @@ async def _category_tree(market: str, date: str | None) -> list[Any]:
         now = time.time()
         if hit and now - hit[0] < _CAT_TTL:
             return hit[1]
-        rows_all: list[Any] = []
-        start = 0
-        while start < 300000:
-            pages = await asyncio.gather(*[
-                _category_page(market, date, start + i * _CAT_PAGE)
-                for i in range(_CAT_BATCH)
-            ])
-            for rows in pages:
-                rows_all.extend(rows)
-            if any(len(rows) < _CAT_PAGE for rows in pages):
-                break
-            start += _CAT_PAGE * _CAT_BATCH
-        _CAT_CACHE[key] = (time.time(), rows_all)
-        return rows_all
+        body = {"startRow": 0, "endRow": _CAT_PAGE,
+                "filterModel": {}, "sortModel": []}
+        data = await _call("POST", BASES[market], "category/list",
+                           {"date": date}, body)
+        rows = data.get("data", data) if isinstance(data, dict) else data
+        rows = rows if isinstance(rows, list) else []
+        _CAT_CACHE[key] = (time.time(), rows)
+        return rows
 
 
 # --------------------------------------------------------------------------- #
