@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -85,9 +86,11 @@ def _body(start: int, limit: int, sort_by: str | None, sort_dir: str,
     if sort_by:
         sort_model = [{"colId": sort_by, "sort": sort_dir}]
     start = max(0, int(start))
+    # API не отдаёт больше 500 строк за запрос
+    limit = min(max(1, int(limit)), 500)
     return {
         "startRow": start,
-        "endRow": start + max(1, int(limit)),
+        "endRow": start + limit,
         "filterModel": filters or {},
         "sortModel": sort_model,
     }
@@ -222,6 +225,35 @@ async def _entity_report(market: str, entity: str, report: str, path: str,
     return await _call("POST", BASES[market], f"{entity}/{report}", params, body)
 
 
+# Дерево категорий кэшируется: API отдаёт максимум 500 строк за запрос,
+# а полное дерево — это десятки страниц, то есть десятки единиц лимита.
+_CAT_CACHE: dict[str, tuple[float, list[Any]]] = {}
+_CAT_TTL = 21600  # 6 часов
+_CAT_PAGE = 500
+
+
+async def _category_tree(market: str, date: str | None) -> list[Any]:
+    key = f"{market}:{date or ''}"
+    hit = _CAT_CACHE.get(key)
+    now = time.time()
+    if hit and now - hit[0] < _CAT_TTL:
+        return hit[1]
+    rows_all: list[Any] = []
+    for start in range(0, 120000, _CAT_PAGE):
+        body = {"startRow": start, "endRow": start + _CAT_PAGE,
+                "filterModel": {}, "sortModel": []}
+        data = await _call("POST", BASES[market], "category/list",
+                           {"date": date}, body)
+        rows = data.get("data", data) if isinstance(data, dict) else data
+        if not isinstance(rows, list) or not rows:
+            break
+        rows_all.extend(rows)
+        if len(rows) < _CAT_PAGE:
+            break
+    _CAT_CACHE[key] = (now, rows_all)
+    return rows_all
+
+
 # --------------------------------------------------------------------------- #
 # Инструменты
 # --------------------------------------------------------------------------- #
@@ -255,13 +287,7 @@ async def mpstats_categories(
     market = _market(marketplace)
     if market == "ym":
         raise ValueError("Для Яндекс Маркета список категорий по API не отдаётся.")
-    method = "GET" if market == "wb" else "POST"
-    body = {"startRow": 0, "endRow": 100000, "filterModel": {}, "sortModel": []}
-    data = await _call(method, BASES[market], "category/list",
-                       {"date": date}, body if method == "POST" else None)
-    rows = data.get("data", data) if isinstance(data, dict) else data
-    if not isinstance(rows, list):
-        return _trim(data)
+    rows = await _category_tree(market, date)
     needle = query.strip().lower()
     if needle:
         rows = [r for r in rows
@@ -581,4 +607,3 @@ async def health(_: Request) -> JSONResponse:
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=PORT, path=MCP_PATH)
-
