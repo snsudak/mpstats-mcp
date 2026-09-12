@@ -30,7 +30,7 @@ from starlette.responses import JSONResponse
 TOKEN = os.environ.get("MPSTATS_TOKEN", "").strip()
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp").strip() or "/mcp"
 PORT = int(os.environ.get("PORT", "8000"))
-MAX_RESPONSE_CHARS = int(os.environ.get("MAX_RESPONSE_CHARS", "60000"))
+MAX_RESPONSE_CHARS = int(os.environ.get("MAX_RESPONSE_CHARS", "25000"))
 TIMEOUT = float(os.environ.get("MPSTATS_TIMEOUT", "90"))
 
 API_ROOT = "https://mpstats.io/api"
@@ -95,6 +95,22 @@ def _body(start: int, limit: int, sort_by: str | None, sort_dir: str,
         "filterModel": filters or {},
         "sortModel": sort_model,
     }
+
+
+def _page(payload: Any, start: int, limit: int) -> Any:
+    """Часть методов игнорирует пагинацию и отдаёт всё — режем на своей стороне."""
+    start = max(0, int(start))
+    limit = max(1, int(limit))
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        rows = payload["data"]
+        if len(rows) > limit:
+            payload = dict(payload)
+            payload["total"] = payload.get("total") or len(rows)
+            payload["data"] = rows[start:start + limit]
+    elif isinstance(payload, list) and len(payload) > limit:
+        total = len(payload)
+        payload = {"total": total, "data": payload[start:start + limit]}
+    return payload
 
 
 def _trim(payload: Any) -> str:
@@ -214,7 +230,8 @@ async def _entity_report(market: str, entity: str, report: str, path: str,
             )
         method, api_path = route
         body = _body(start, limit, sort_by, sort_dir, filters) if method == "POST" else None
-        return await _call(method, BASES["ym"], api_path, params, body)
+        data = await _call(method, BASES["ym"], api_path, params, body)
+        return _page(data, start, limit)
 
     allowed = WB_ENTITY_REPORTS if market == "wb" else OZ_ENTITY_REPORTS
     if report not in allowed:
@@ -223,7 +240,8 @@ async def _entity_report(market: str, entity: str, report: str, path: str,
             f"Доступно: {sorted(allowed)}"
         )
     body = _body(start, limit, sort_by, sort_dir, filters)
-    return await _call("POST", BASES[market], f"{entity}/{report}", params, body)
+    data = await _call("POST", BASES[market], f"{entity}/{report}", params, body)
+    return _page(data, start, limit)
 
 
 # Дерево категорий кэшируется: API отдаёт максимум 500 строк за запрос,
@@ -473,7 +491,8 @@ async def mpstats_subject(
     if fbs is not None:
         params["fbs"] = fbs
     body = _body(start, limit, sort_by, sort_dir, None)
-    return _trim(await _call("POST", BASES["wb"], f"subject/{report}", params, body))
+    data = await _call("POST", BASES["wb"], f"subject/{report}", params, body)
+    return _trim(_page(data, start, limit))
 
 
 @mcp.tool
@@ -507,7 +526,8 @@ async def mpstats_similar(
         raise ValueError("family: similar | identical | identical_wb | in_similar")
     params = {"path": sku, "d1": d1, "d2": d2}
     body = _body(start, limit, sort_by, sort_dir, None)
-    return _trim(await _call("POST", BASES["wb"], f"{family}/{report}", params, body))
+    data = await _call("POST", BASES["wb"], f"{family}/{report}", params, body)
+    return _trim(_page(data, start, limit))
 
 
 @mcp.tool
@@ -541,9 +561,11 @@ async def mpstats_compare(
         params["fbs"] = fbs
     body = _body(0, limit, None, "desc", None)
     if market == "ym":
-        return _trim(await _call("POST", BASES["ym"],
-                                 f"ym/get/{entity}/compare", params, body))
-    return _trim(await _call("POST", BASES[market], f"{entity}/compare", params, body))
+        data = await _call("POST", BASES["ym"], f"ym/get/{entity}/compare",
+                           params, body)
+    else:
+        data = await _call("POST", BASES[market], f"{entity}/compare", params, body)
+    return _trim(_page(data, 0, limit))
 
 
 @mcp.tool
